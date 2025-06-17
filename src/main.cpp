@@ -37,7 +37,7 @@ const char* MODE_KEY = "sys_mode"; // Define and initialize
 // GSM & Call related
 static bool isCalling = false;
 static unsigned long callStart = 0;
-const unsigned long callDuration = 60000; // 30 seconds
+const unsigned long callDuration = 60000; // 60 seconds
 
 // Global cooldown variables for alerts
 unsigned long lastMotionAlert = 0;
@@ -52,6 +52,10 @@ const unsigned long smokeAlertInterval = 60000; // 60 seconds
 // --- Sensor Reading Interval ---
 unsigned long lastSensorReadTime = 0;
 const unsigned long SENSOR_READ_INTERVAL = 5000; // Read sensors every 5 seconds
+
+// --- New: Global variables for Time/Location Check Interval ---
+unsigned long lastTimeLocationCheck = 0;
+const unsigned long TIME_LOCATION_CHECK_INTERVAL = 30000; // Check every 30 seconds
 
 // In gsm.cpp, ensure checkForIncomingSMS calls this global handleIncomingCommand
 // In mqtt.cpp, ensure handleMqttCommand calls this global handleIncomingCommand
@@ -122,8 +126,8 @@ void setup()
       myPrint("⚠️ ESP32 NOT connected via gsm!");
     }
   }
-   // After initial setup, inform dashboard about the mode
-  if (currentSystemMode == MODE_GSM_ONLY) setDashboardMode("GSM_ONLY_ACTIVE");
+    // After initial setup, inform dashboard about the mode
+  if (currentSystemMode == MODE_GSM_ONLY) sendSMS("GSM_ONLY_ACTIVE");
   else if (currentSystemMode == MODE_WIFI_ONLY) setDashboardMode("WIFI_ONLY_ACTIVE");
   else setDashboardMode("BOTH_ACTIVE");
 }
@@ -256,6 +260,22 @@ void loop()
     }
   } // End of SENSOR_READ_INTERVAL check
 
+  // --- Periodically get GSM Time and Location for testing ---
+  // Only attempt if GSM is enabled in the current mode and ready
+  if ((currentSystemMode == MODE_GSM_ONLY || currentSystemMode == MODE_BOTH) && isGSMReady()) {
+    if (now - lastTimeLocationCheck >= TIME_LOCATION_CHECK_INTERVAL) {
+      lastTimeLocationCheck = now;
+
+      Serial.println("\n--- GSM Time & Location Check ---");
+      String networkTime = getNetworkTime();
+      Serial.println("GSM Network Time: " + networkTime);
+
+      String gsmLocation = getGsmLocation();
+      Serial.println("GSM Location: " + gsmLocation);
+      Serial.println("---------------------------------");
+    }
+  }
+
   // --- Critical High Temperature for Calling ---
   // This part is still blocking due to callNumber/handUPCall.
   // In a non-blocking `loop()`, you'd need to manage calling state more carefully.
@@ -276,8 +296,7 @@ void loop()
   // and GSM setup/SMS sending still exist, but they are generally one-time or infrequent.
   // The GSM waitResponse in checkForIncomingSMS might also be a slight concern.
 }
-
 }
-// In aside.cpp and gsm.cpp, ensure `handleIncomingCommand` is defined or called correctly.
-// For now, I've defined a local one in main.cpp to demonstrate.
-// The `mqtt_callback` also needs to call this `handleIncomingCommand`.
+// Ensure `handleIncomingCommand` is defined in `aside.cpp` and declared in `aside.h`
+// if `gsm.cpp` and `mqtt.cpp` are calling it.
+// The provided `aside.cpp` contains the definition for `handleIncomingCommand`.

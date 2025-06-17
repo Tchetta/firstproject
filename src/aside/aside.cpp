@@ -23,10 +23,10 @@ int setup_wifi(const char* ssid, const char* password) {
   
   Serial.println("");
   if (WiFi.status() != WL_CONNECTED) {
-    return 1;
     Serial.println("WiFi connected");
     Serial.print("ESP32 IP address: ");
     Serial.println(WiFi.localIP());
+    return 1;
   } else {
     return 0;
   }
@@ -65,48 +65,6 @@ void setSystemMode(SystemMode newMode) {
   // Optionally reboot here or prompt user to reboot for full effect
   ESP.restart();
 }
-
-void handleIncomingCommandOLD(const String &sender, const String &message) {
-    // Define trusted numbers
-    const char* trustedNumbers[] = {
-      "+237653997220",  // Replace with your phone number(s)
-      "653997220",  // Replace with your phone number(s)
-      "+237620637397",
-      "620637397"
-    };
-  
-    bool authorized = false;
-    for (const char* number : trustedNumbers) {
-      if (sender == String(number)) {
-        authorized = true;
-        break;
-      }
-    }
-  
-    if (!authorized) {
-      Serial.println("Unauthorized sender! Ignoring command.");
-      return;
-    }
-  
-    // Match commands (basic)
-    if (message.equalsIgnoreCase("LIGHT ON")) {
-      Serial.println("Turning light ON...");
-      // sendSerialLogToServer("Turning light ON...");
-      setLedState("on");
-      // digitalWrite(LED_BUILTIN, HIGH); // Example
-    } else if (message.equalsIgnoreCase("LIGHT OFF")) {
-      Serial.println("Turning light OFF...");
-      // sendSerialLogToServer("Turning light OFF...");
-      setLedState("off");
-      // digitalWrite(LED_BUILTIN, LOW);
-    } else if (message.equalsIgnoreCase("REBOOT")) {
-      Serial.println("Rebooting...");
-      // sendSerialLogToServer("Rebooting...");
-      ESP.restart(); // Only on ESP32/ESP8266
-    } else {
-      Serial.println("Unknown command.");
-    }
-  }
 
   void handleIncomingCommand(const String &sender, const String &message) {
     // This is a placeholder for `handleIncomingCommand`

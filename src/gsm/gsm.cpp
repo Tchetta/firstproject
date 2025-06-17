@@ -225,3 +225,58 @@ void deleteAllSMS() {
   }
 }
 
+/**
+ * @brief Retrieves the current date and time from the GSM network using TinyGSM's built-in function.
+ *
+ * @return String containing the network time, or "N/A" if unable to retrieve.
+ */
+String getNetworkTime() {
+  if (!modem.isNetworkConnected()) {
+    SerialMon.println("Cannot get network time: Not connected to GSM network.");
+    return "N/A";
+  }
+
+  SerialMon.println("Attempting to get network time using modem.getGSMDateTime(DATE_FULL)...");
+  // Use TinyGSMDateTimeFormat::DATE_FULL for full date and time string
+  String timeStr = modem.getGSMDateTime(TinyGSMDateTimeFormat::DATE_FULL);
+
+  if (!timeStr.isEmpty()) { // Check if the returned string is not empty
+    SerialMon.println("Network Time: " + timeStr);
+    return timeStr;
+  } else {
+    SerialMon.println("Failed to get network time.");
+    return "N/A";
+  }
+}
+
+/**
+ * @brief Retrieves the approximate location (latitude and longitude) using
+ * GSM cell tower information (LBS - Location Based Services) via TinyGSM's built-in function.
+ * Note: This is NOT precise GPS data from satellites. Accuracy varies greatly.
+ * Requires modem to be connected to network.
+ *
+ * @return String containing location details (e.g., "Lat: X.XXXX, Lng: Y.YYYY") or "N/A" if not available.
+ * The format depends on what the 0-argument getGsmLocation() function returns.
+ */
+String getGsmLocation() {
+  if (!modem.isNetworkConnected()) {
+    SerialMon.println("Cannot get GSM location: Not connected to GSM network.");
+    return "N/A";
+  }
+
+  SerialMon.println("Attempting to get GSM location using modem.getGsmLocation() (0-argument version)...");
+  // The compiler feedback clearly showed String getGsmLocation() as a valid overload.
+  // This function typically returns a formatted string like "+CIPGSMLOC: <stat>,<lon>,<lat>,<date>,<time>"
+  // or a more user-friendly string depending on the TinyGSM version.
+  String locStr = modem.getGsmLocation();
+
+  if (!locStr.isEmpty()) {
+    SerialMon.println("GSM Location: " + locStr);
+    // You might need to parse 'locStr' further if you want individual lat/lon/accuracy/timestamp values.
+    // For now, we'll return the raw string provided by the modem.
+    return locStr;
+  } else {
+    SerialMon.println("Failed to get GSM location or LBS not supported by network.");
+    return "N/A";
+  }
+}

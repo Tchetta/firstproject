@@ -9,7 +9,7 @@ const unsigned long checkInterval = 500;  // Check every 500 ms
 void setupPIR(int pin) {
   pirPin = pin;
   pinMode(pirPin, INPUT);
-  delay(10000);  // Warm-up delay
+  delay(100);  // Warm-up delay
   Serial.println("<PIR> Sensor ready after warm-up.");
 }
 

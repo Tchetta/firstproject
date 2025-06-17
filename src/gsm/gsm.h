@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 
-// void powerOnGSM();
+// Forward declarations for existing functions
 void setupGSM();
 bool sendSMS(const String& message, const String& number = "653997220");
 bool isGSMReady();
@@ -14,5 +14,9 @@ void checkForIncomingSMS();
 void deleteLastSMS();
 void deleteAllSMS();
 void handUPCall();
+
+// New function prototypes for time and location
+String getNetworkTime(); // Returns time/date string
+String getGsmLocation(); // Returns location string (latitude, longitude)
 
 #endif

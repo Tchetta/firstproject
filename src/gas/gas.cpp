@@ -35,7 +35,7 @@ void initGasSensor() {
   for (int i = 0; i < 10; i++) {
     MQ2.update();
     calcR0 += MQ2.calibrate(RatioMQ2CleanAir);
-    delay(500);
+    delay(200);
   }
   MQ2.setR0(calcR0 / 10);
   Serial.println("✅ Gas sensor ready!");
