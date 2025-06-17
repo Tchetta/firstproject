@@ -25,11 +25,19 @@ const long RECONNECT_INTERVAL = 5000; // Try to reconnect every 5 seconds
 void mqtt_callback(char* topic, byte* payload, unsigned int length);
 void handleMqttCommand(const String& message); // New handler for MQTT commands
 
-// Function to initialize MQTT client
+/* // Function to initialize MQTT client
 void mqttSetup(const char* server, int port) {
   client.setServer(server, port);
   client.setCallback(mqtt_callback); // Use the new callback name
   Serial.println("MQTT client setup complete.");
+} */
+
+// Function to initialize MQTT client - MODIFIED TO ACCEPT IPAddress
+void mqttSetup(IPAddress serverIp, int port) {
+  client.setServer(serverIp, port); // Use the IPAddress object directly
+  client.setCallback(mqtt_callback); // Use the new callback name
+  Serial.print("MQTT client setup complete for broker IP: ");
+  Serial.println(serverIp);
 }
 
 void mqttReconnect() {

@@ -53,59 +53,6 @@ const unsigned long smokeAlertInterval = 60000; // 60 seconds
 unsigned long lastSensorReadTime = 0;
 const unsigned long SENSOR_READ_INTERVAL = 5000; // Read sensors every 5 seconds
 
-// --- Function to set and save system mode ---
-/* void setSystemMode(SystemMode newMode) {
-  currentSystemMode = newMode;
-  preferences.begin("smart_home", false); // Open NVS namespace
-  preferences.putUChar(MODE_KEY, (uint8_t)newMode); // Save as uint8_t
-  preferences.end();
-  Serial.print("System mode set to: ");
-  if (newMode == MODE_GSM_ONLY) Serial.println("GSM_ONLY");
-  else if (newMode == MODE_WIFI_ONLY) Serial.println("WIFI_ONLY");
-  else Serial.println("BOTH");
-  // Optionally reboot here or prompt user to reboot for full effect
-  ESP.restart();
-} */
-
-// --- Modified handleIncomingCommand for SMS & MQTT ---
-// You will need to move this into aside.cpp if it's there
-// For now, let's keep it here for demonstration or make it globally accessible
-/* void handleIncomingCommand(const String &sender, const String &message) {
-    // This is a placeholder for `handleIncomingCommand`
-    // You'd ideally make this a global function or pass a function pointer
-    // to your GSM and MQTT modules.
-    // For now, let's just show how it would affect the mode.
-
-    Serial.print("Received Command (from ");
-    Serial.print(sender);
-    Serial.print("): ");
-    Serial.println(message);
-
-    if (message.equalsIgnoreCase("LIGHT ON")) {
-      setLedState("on"); // Assuming this is defined elsewhere/globally available
-    } else if (message.equalsIgnoreCase("LIGHT OFF")) {
-      setLedState("off");
-    } else if (message.equalsIgnoreCase("REBOOT")) {
-      Serial.println("Rebooting...");
-      ESP.restart();
-    } else if (message.equalsIgnoreCase("MODE GSM")) {
-      setSystemMode(MODE_GSM_ONLY);
-      myPrint("Mode set to GSM only. Rebooting...");
-      ESP.restart();
-    } else if (message.equalsIgnoreCase("MODE WIFI")) {
-      setSystemMode(MODE_WIFI_ONLY);
-      myPrint("Mode set to WiFi only. Rebooting...");
-      ESP.restart();
-    } else if (message.equalsIgnoreCase("MODE BOTH")) {
-      setSystemMode(MODE_BOTH);
-      myPrint("Mode set to Both. Rebooting...");
-      ESP.restart();
-    } else {
-      Serial.println("Unknown command.");
-    }
-    // Also, remember to send feedback via SMS or MQTT as appropriate
-}
- */
 // In gsm.cpp, ensure checkForIncomingSMS calls this global handleIncomingCommand
 // In mqtt.cpp, ensure handleMqttCommand calls this global handleIncomingCommand
 
@@ -148,11 +95,18 @@ void setup()
     if (setup_wifi(wifi_ssid, wifi_password) == 0) { // Check if WiFi connected successfully
       Serial.println("WiFi connected!");
       myPrint("WiFi - Successfully connected via wifi!");
-      mqttSetup(mqtt_server, mqtt_port); // Setup MQTT client
+      
+      // --- DYNAMIC IP DISCOVERY FOR MQTT BROKER ---
+      IPAddress ip = WiFi.localIP();
+      // Construct the broker's IP using the ESP32's current subnet and the known last octet (.240)
+      IPAddress mqttBrokerIp(ip[0], ip[1], ip[2], 240); // Create an IPAddress object directly
+      Serial.print("Derived MQTT Broker IP: ");
+      Serial.println(mqttBrokerIp); // Print the IPAddress object
+      mqttSetup(mqttBrokerIp, mqtt_port); // Setup MQTT client with dynamic IP
       // setDashboardMode("WIFI_CONNECTED"); // Inform dashboard
     } else {
       // Serial.println("WiFi NOT connected!");
-      myPrint("WiFi - NOT connected!");
+      Serial.println("WiFi - NOT connected!");
       // Fallback or error handling
     }
   }

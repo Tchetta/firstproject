@@ -9,7 +9,8 @@ extern const char* mqtt_server; // Declared extern, defined in .cpp
 extern const int mqtt_port;
 
 // Function prototypes
-void mqttSetup(const char* server, int port); // Added parameters for flexibility
+// void mqttSetup(const char* server, int port); // Added parameters for flexibility
+void mqttSetup(IPAddress serverIp, int port);
 void mqttLoop(); // New function to be called frequently in main loop
 bool publishSensorData(bool motion, int fire, float temperature, float humidity, float gasLPG, float gasCO, float gasSmoke);
 void setDashboardMode(String mode); // Function to update dashboard mode via MQTT
