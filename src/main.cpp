@@ -18,7 +18,7 @@
 #define CURRENT_PIN 32
 #define FLAME_PIN 35
 #define PIR_SENSOR_PIN 2
-#define ALERT_PIN 4
+#define ALERT_PIN 13
 
 // analog pins
 // #define MQ2_PIN 34
@@ -63,6 +63,8 @@ const unsigned long TIME_LOCATION_CHECK_INTERVAL = 30000; // Check every 30 seco
 
 void setup()
 {
+  pinMode(13, OUTPUT);
+  digitalWrite(13, HIGH);
   Serial.begin(115200);
   Serial.println();
   String thisBoard = ARDUINO_BOARD;
@@ -130,10 +132,14 @@ void setup()
   if (currentSystemMode == MODE_GSM_ONLY) sendSMS("GSM_ONLY_ACTIVE");
   else if (currentSystemMode == MODE_WIFI_ONLY) setDashboardMode("WIFI_ONLY_ACTIVE");
   else setDashboardMode("BOTH_ACTIVE");
+
+  digitalWrite(13, LOW);
+
 }
 
 void loop()
 {
+  digitalWrite(13, HIGH);
   // --- Handle MQTT (if WiFi enabled) ---
   if (currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) {
     mqttLoop(); // This calls client.loop() and non-blocking reconnect
@@ -162,8 +168,8 @@ void loop()
     humidity = isnan(humidity) ? -1.0F : humidity;
     current = currentValue(CURRENT_PIN);
     gasLPG = (0 > gasLPG || gasLPG > 100 || isnan(gasLPG)) ? -1.0F : gasLPG;
-    gasCO = (0 > gasCO || gasCO > 100 || isnan(gasCO)) ? -1.0F : gasCO;
-    gasSmoke = (0 > gasSmoke || gasSmoke > 100 || isnan(gasSmoke)) ? -1.0F : gasSmoke;
+    gasCO = (0 > gasCO || gasCO > 200 || isnan(gasCO)) ? -1.0F : gasCO;
+    gasSmoke = (0 > gasSmoke || gasSmoke > 3700 || isnan(gasSmoke)) ? -1.0F : gasSmoke;
     fire = fire == 47 ? -1.0F : fire;
     motion = isMotionDetected(); // This is non-blocking with its own internal timer
 
@@ -295,6 +301,8 @@ void loop()
   // The delays in some sensor setup functions (like DHT, PIR warm-up, Gas calibration)
   // and GSM setup/SMS sending still exist, but they are generally one-time or infrequent.
   // The GSM waitResponse in checkForIncomingSMS might also be a slight concern.
+  digitalWrite(13, LOW);
+  delay(1);
 }
 }
 // Ensure `handleIncomingCommand` is defined in `aside.cpp` and declared in `aside.h`
