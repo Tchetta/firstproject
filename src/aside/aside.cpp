@@ -1,11 +1,12 @@
 #include <Arduino.h>
 #include "aside.h"
 #include "../http/http_app.h"
+#include "../gsm/gsm.h"
 #include <WiFi.h>
 #include <PubSubClient.h>
 
 // WiFi credentials
-// const char* ssid = "Redmi 13C";
+// const char* ssid = "Redmi 4C";
 // const char* password = "Rodel2.0";
 
 int setup_wifi(const char* ssid, const char* password) {
@@ -14,6 +15,7 @@ int setup_wifi(const char* ssid, const char* password) {
   Serial.print("Connecting to ");
   Serial.println(ssid);
 
+  WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED) {
@@ -33,13 +35,13 @@ int setup_wifi(const char* ssid, const char* password) {
 }
 
 void blink_internal_led(int count, int delayTIme) {
-    pinMode(13, OUTPUT);
+    pinMode(4, OUTPUT);
 
     int i = 0;
     while (i != count) {
-        digitalWrite(13, HIGH);
+        digitalWrite(4, HIGH);
         delay(delayTIme);
-        digitalWrite(13, LOW);
+        digitalWrite(4, LOW);
         delay(delayTIme);
 
         i++;
@@ -47,10 +49,10 @@ void blink_internal_led(int count, int delayTIme) {
 }
 
 void setBlinkPin() {
-    pinMode(13, OUTPUT);
+    pinMode(4, OUTPUT);
 }
 void setInternalBlinkPin() {
-    pinMode(13, OUTPUT);
+    pinMode(4, OUTPUT);
 }
 
 void setSystemMode(SystemMode newMode) {
@@ -103,27 +105,40 @@ void setSystemMode(SystemMode newMode) {
 
     if (message.equalsIgnoreCase("ALARM ON")) {
         Serial.println("Turning ALARM ON...");
+        sendSMS("Turning ALARM ON...");
         // Call your existing setLedState("on") or similar function
         // setLedState("on"); // Ensure this function is globally accessible or passed
-        digitalWrite(13, HIGH);
+        digitalWrite(4, HIGH);
     } else if (message.equalsIgnoreCase("ALARM OFF")) {
         Serial.println("Turning ALARM OFF...");
+        sendSMS("Turning ALARM OFF...");
         // setLedState("off");
-        digitalWrite(13, LOW);
+        digitalWrite(4, LOW);
+    } else if (message.equalsIgnoreCase("MAINS ON")) {
+        Serial.println("MQTT: Turning MAIN ON...");
+        sendSMS("MQTT: Turning MAIN ON...");
+        // setLedState("off");
+        digitalWrite(4, LOW);
+    } else if (message.equalsIgnoreCase("MAINS OFF")) {
+        Serial.println("MQTT: Turning MAINS OFF...");
+        sendSMS("MQTT: Turning MAINS OFF...");
+        // setLedState("off");
+        digitalWrite(4, LOW);
     } else if (message.equalsIgnoreCase("REBOOT")) {
       Serial.println("Rebooting...");
+      sendSMS("Rebooting...");
       ESP.restart();
     } else if (message.equalsIgnoreCase("MODE GSM")) {
       setSystemMode(MODE_GSM_ONLY);
-      myPrint("Mode set to GSM only. Rebooting...");
+      sendSMS("Mode set to GSM only. Rebooting...");
       ESP.restart();
     } else if (message.equalsIgnoreCase("MODE WIFI")) {
       setSystemMode(MODE_WIFI_ONLY);
-      myPrint("Mode set to WiFi only. Rebooting...");
+      sendSMS("Mode set to WiFi only. Rebooting...");
       ESP.restart();
     } else if (message.equalsIgnoreCase("MODE BOTH")) {
       setSystemMode(MODE_BOTH);
-      myPrint("Mode set to Both. Rebooting...");
+      sendSMS("Mode set to Both. Rebooting...");
       ESP.restart();
     } else {
       Serial.println("Unknown command.");

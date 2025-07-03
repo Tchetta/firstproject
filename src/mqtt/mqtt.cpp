@@ -1,5 +1,6 @@
 #include "mqtt.h"
 #include "../aside/aside.h" // For myPrint, if used
+#include "esp_now/esp_now_handler.h"
 // Make sure to include the file where the mode management function will reside,
 // or define a global variable for the current mode.
 // For now, we'll assume a global 'currentSystemMode' can be updated or a function call.
@@ -12,6 +13,7 @@ const int mqtt_port = 1883;
 const char* MQTT_PUBLISH_TOPIC_SENSORS = "smart_home/sensors";
 const char* MQTT_SUBSCRIBE_TOPIC_COMMANDS = "smart_home/commands";
 const char* MQTT_PUBLISH_TOPIC_MODE = "smart_home/mode_status"; // New topic for mode updates
+const char* MQTT_PUBLISH_TOPIC_INFO = "smart_home/info"; // New topic for info updates
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -105,11 +107,22 @@ void handleMqttCommand(const String& message) {
         Serial.println("MQTT: Turning ALARM ON...");
         // Call your existing setLedState("on") or similar function
         // setLedState("on"); // Ensure this function is globally accessible or passed
-        digitalWrite(13, HIGH);
+        digitalWrite(4, HIGH);
     } else if (message.equalsIgnoreCase("ALARM OFF")) {
         Serial.println("MQTT: Turning ALARM OFF...");
         // setLedState("off");
-        digitalWrite(13, LOW);
+        digitalWrite(4, LOW);
+    } else if (message.equalsIgnoreCase("MAINS ON")) {
+        Serial.println("MQTT: Turning MAIN ON...");
+        // setLedState("off");
+        digitalWrite(4, LOW);
+        ESPNowHandler_sendCommand("ON_APPLIANCE");
+    } else if (message.equalsIgnoreCase("MAINS OFF")) {
+        Serial.println("MQTT: Turning MAINS OFF...");
+        // setLedState("off");
+        digitalWrite(4, LOW);
+        ESPNowHandler_sendCommand("OFF_APPLIANCE");
+
     } else if (message.equalsIgnoreCase("MODE GSM")) {
         ("MQTT: Setting mode to GSM only...");
         setSystemMode(MODE_GSM_ONLY);
@@ -123,6 +136,11 @@ void handleMqttCommand(const String& message) {
         Serial.println("MQTT: Setting mode to Both GSM & WiFi...");
         setSystemMode(MODE_BOTH);
         ESP.restart();
+    } else if (message.equalsIgnoreCase("MODE")) {
+        Serial.println("MQTT: Telling mode to dashboard...");
+        if (currentSystemMode == MODE_GSM_ONLY) setDashboardMode("GSM_ONLY_ACTIVE");
+        else if (currentSystemMode == MODE_WIFI_ONLY) setDashboardMode("WIFI_ONLY_ACTIVE");
+        else setDashboardMode("BOTH_ACTIVE");
     } else if (message.equalsIgnoreCase("REBOOT")) {
         Serial.println("MQTT: Rebooting...");
         ESP.restart();
@@ -133,7 +151,7 @@ void handleMqttCommand(const String& message) {
 
 
 // Function to publish sensor data via MQTT
-bool publishSensorData(bool motion, int fire, float temperature, float humidity, float gasLPG, float gasCO, float gasSmoke) {
+bool publishSensorData(bool motion, int fire, float temperature, float humidity, float gasLPG, float gasCO, float gasSmoke, float rms_Voltage) {
   if (!client.connected()) {
     Serial.println("MQTT: Not connected, cannot publish sensor data.");
     return false;
@@ -145,8 +163,8 @@ bool publishSensorData(bool motion, int fire, float temperature, float humidity,
 
   // Example JSON structure: {"motion":1,"fire":50,"temp":25.50,"hum":60.20,"lpg":10.00,"co":2.00,"smoke":500.00}
   snprintf(jsonBuffer, sizeof(jsonBuffer),
-           "{\"motion\":%d,\"fire\":%d,\"temp\":%.2f,\"hum\":%.2f,\"lpg\":%.2f,\"co\":%.2f,\"smoke\":%.2f}",
-           motion ? 1 : 0, fire, temperature, humidity, gasLPG, gasCO, gasSmoke); // Use temp_val and hum_val
+           "{\"motion\":%d,\"fire\":%d,\"temp\":%.2f,\"hum\":%.2f,\"lpg\":%.2f,\"co\":%.2f,\"smoke\":%.2f,\"Vrms\":%.2f}",
+           motion ? 1 : 0, fire, temperature, humidity, gasLPG, gasCO, gasSmoke, rms_Voltage); // Use temp_val and hum_val
 
   Serial.print("Publishing to ");
   Serial.print(MQTT_PUBLISH_TOPIC_SENSORS);
@@ -154,6 +172,10 @@ bool publishSensorData(bool motion, int fire, float temperature, float humidity,
   Serial.println(jsonBuffer);
 
   return client.publish(MQTT_PUBLISH_TOPIC_SENSORS, jsonBuffer);
+}
+
+bool publishInfo(const char* info) {
+  return client.publish(MQTT_PUBLISH_TOPIC_INFO, info);
 }
 
 // Function to update the dashboard with current operational mode

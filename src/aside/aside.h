@@ -11,7 +11,7 @@ void handleIncomingCommand(const String &sender, const String &message);
 void myPrint(String text);
 void flameSetup(int flamePin);
 bool flameValue(int flamePin);
-int setup_wifi(const char* ssid, const char* password);
+// int setup_wifi(const char* ssid, const char* password);
 
 // --- Global variables for Operational Mode Management ---
 enum SystemMode { MODE_GSM_ONLY, MODE_WIFI_ONLY, MODE_BOTH };

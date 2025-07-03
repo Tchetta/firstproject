@@ -7,7 +7,7 @@
 #include "../aside/aside.h"
 #include "../gsm/gsm.h"
 
-#define LED_PIN 13
+#define LED_PIN 4
 
 const char* serverURL = "http://192.168.221.240:8888/esp32tests/api"; // Replace with your PC's local IP
 
