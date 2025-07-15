@@ -2,13 +2,21 @@
 #include "aside.h"
 #include "../http/http_app.h"
 #include "../gsm/gsm.h"
+#include "../mqtt/mqtt.h"
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include "esp_now/esp_now_handler.h"
 
-// WiFi credentials
-// const char* ssid = "Redmi 4C";
-// const char* password = "Rodel2.0";
+extern bool manualAlarmOverride;
+extern SensorMuteStatus mutedSensors;
+extern bool motionManualOverride;
+extern bool motionManuallyEnabled;
+extern bool alarmManualOverride;
+extern bool alarmManuallyEnabled;
 
+const int alertPin = 2;
+
+// ──────────── WiFi Setup ─────────────
 int setup_wifi(const char* ssid, const char* password) {
   delay(10);
   Serial.println();
@@ -22,68 +30,61 @@ int setup_wifi(const char* ssid, const char* password) {
     delay(500);
     Serial.print(".");
   }
-  
+
   Serial.println("");
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi connected");
+    Serial.println("WiFi not connected.");
+    return 0;
+  } else {
+    Serial.println("WiFi connected.");
     Serial.print("ESP32 IP address: ");
     Serial.println(WiFi.localIP());
     return 1;
-  } else {
-    return 0;
   }
 }
 
-void blink_internal_led(int count, int delayTIme) {
-    pinMode(4, OUTPUT);
-
-    int i = 0;
-    while (i != count) {
-        digitalWrite(4, HIGH);
-        delay(delayTIme);
-        digitalWrite(4, LOW);
-        delay(delayTIme);
-
-        i++;
+// ──────────── LED Blink ─────────────
+void blink_internal_led(int count, int delayTime) {
+    pinMode(alertPin, OUTPUT);
+    for (int i = 0; i < count; i++) {
+        digitalWrite(alertPin, HIGH);
+        delay(delayTime);
+        digitalWrite(alertPin, LOW);
+        delay(delayTime);
     }
 }
 
 void setBlinkPin() {
-    pinMode(4, OUTPUT);
+    pinMode(alertPin, OUTPUT);
 }
 void setInternalBlinkPin() {
-    pinMode(4, OUTPUT);
+    pinMode(alertPin, OUTPUT);
 }
 
+// ──────────── System Mode Change ─────────────
 void setSystemMode(SystemMode newMode) {
   currentSystemMode = newMode;
-  preferences.begin("smart_home", false); // Open NVS namespace
-  preferences.putUChar(MODE_KEY, (uint8_t)newMode); // Save as uint8_t
+  preferences.begin("smart_home", false);
+  preferences.putUChar(MODE_KEY, (uint8_t)newMode);
   preferences.end();
   Serial.print("System mode set to: ");
   if (newMode == MODE_GSM_ONLY) Serial.println("GSM_ONLY");
   else if (newMode == MODE_WIFI_ONLY) Serial.println("WIFI_ONLY");
   else Serial.println("BOTH");
-  // Optionally reboot here or prompt user to reboot for full effect
   ESP.restart();
 }
 
-  void handleIncomingCommand(const String &sender, const String &message) {
-    // This is a placeholder for `handleIncomingCommand`
-    // You'd ideally make this a global function or pass a function pointer
-    // to your GSM and MQTT modules.
-    // For now, let's just show how it would affect the mode.
-
-    // Define trusted numbers (if applicable for SMS, less so for MQTT unless authenticated)
+// ──────────── Command Handling ─────────────
+void handleIncomingCommand(const String &sender, const String &message) {
     const char* trustedNumbers[] = {
-      "+237653997220",
-      "653997220",
-      "+237620637397",
-      "620637397"
+      "+237653997220", "653997220",
+      "+237620637397", "620637397"
     };
+
     bool authorized = false;
-    // Check for authorization if from SMS
-    if (sender != "MQTT_CLIENT") { // A simple way to differentiate for now
+    bool fromMQTT = sender == "MQTT_CLIENT";
+
+    if (!fromMQTT) {
         for (const char* number : trustedNumbers) {
             if (sender == String(number)) {
                 authorized = true;
@@ -94,58 +95,115 @@ void setSystemMode(SystemMode newMode) {
             Serial.println("Unauthorized sender. Ignoring command.");
             return;
         }
-    } else { // Assume MQTT commands are authorized if they reach here (e.g. from your dashboard)
-        authorized = true;
     }
 
-    Serial.print("Received Command (from ");
+    String msg = message;
+    msg.trim();
+    msg.toUpperCase();
+
+    Serial.print("Command (from ");
     Serial.print(sender);
     Serial.print("): ");
-    Serial.println(message);
+    Serial.println(msg);
 
-    if (message.equalsIgnoreCase("ALARM ON")) {
-        Serial.println("Turning ALARM ON...");
-        sendSMS("Turning ALARM ON...");
-        // Call your existing setLedState("on") or similar function
-        // setLedState("on"); // Ensure this function is globally accessible or passed
-        digitalWrite(4, HIGH);
-    } else if (message.equalsIgnoreCase("ALARM OFF")) {
-        Serial.println("Turning ALARM OFF...");
-        sendSMS("Turning ALARM OFF...");
-        // setLedState("off");
-        digitalWrite(4, LOW);
-    } else if (message.equalsIgnoreCase("MAINS ON")) {
-        Serial.println("MQTT: Turning MAIN ON...");
-        sendSMS("MQTT: Turning MAIN ON...");
-        // setLedState("off");
-        digitalWrite(4, LOW);
-    } else if (message.equalsIgnoreCase("MAINS OFF")) {
-        Serial.println("MQTT: Turning MAINS OFF...");
-        sendSMS("MQTT: Turning MAINS OFF...");
-        // setLedState("off");
-        digitalWrite(4, LOW);
-    } else if (message.equalsIgnoreCase("REBOOT")) {
-      Serial.println("Rebooting...");
-      sendSMS("Rebooting...");
-      ESP.restart();
-    } else if (message.equalsIgnoreCase("MODE GSM")) {
-      setSystemMode(MODE_GSM_ONLY);
-      sendSMS("Mode set to GSM only. Rebooting...");
-      ESP.restart();
-    } else if (message.equalsIgnoreCase("MODE WIFI")) {
-      setSystemMode(MODE_WIFI_ONLY);
-      sendSMS("Mode set to WiFi only. Rebooting...");
-      ESP.restart();
-    } else if (message.equalsIgnoreCase("MODE BOTH")) {
-      setSystemMode(MODE_BOTH);
-      sendSMS("Mode set to Both. Rebooting...");
-      ESP.restart();
-    } else {
-      Serial.println("Unknown command.");
+    // ───── Alarm Control ─────
+    if (msg == "ALARM ON") {
+        alarmManualOverride = true;
+        alarmManuallyEnabled = true;
+        digitalWrite(alertPin, HIGH);
+        ESPNowHandler_sendCommand("ALARM_ON");
+        if (!fromMQTT) sendSMS("ALARM manually ON");
     }
-    // Also, remember to send feedback via SMS or MQTT as appropriate
+    else if (msg == "ALARM OFF") {
+        alarmManualOverride = true;
+        alarmManuallyEnabled = false;
+        digitalWrite(alertPin, LOW);
+        ESPNowHandler_sendCommand("ALARM_OFF");
+        if (!fromMQTT) sendSMS("ALARM manually OFF");
+    }
+    else if (msg == "ALARM AUTO") {
+        alarmManualOverride = false;
+        if (!fromMQTT) sendSMS("ALARM set to AUTO mode");
+    }
+
+    // ───── Sensor Muting ─────
+    else if (msg == "MUTE MOTION") mutedSensors.motion = true;
+    else if (msg == "UNMUTE MOTION") mutedSensors.motion = false;
+    else if (msg == "MUTE FIRE") mutedSensors.fire = true;
+    else if (msg == "UNMUTE FIRE") mutedSensors.fire = false;
+    else if (msg == "MUTE GAS") mutedSensors.gas = true;
+    else if (msg == "UNMUTE GAS") mutedSensors.gas = false;
+    else if (msg == "MUTE VOLTAGE") mutedSensors.voltage = true;
+    else if (msg == "UNMUTE VOLTAGE") mutedSensors.voltage = false;
+    else if (msg == "MUTE TEMPERATURE") mutedSensors.temperature = true;
+    else if (msg == "UNMUTE TEMPERATURE") mutedSensors.temperature = false;
+
+    // ───── Motion Override ─────
+    else if (msg == "MOTION OFF") {
+        motionManualOverride = true;
+        motionManuallyEnabled = false;
+        if (!fromMQTT) sendSMS("Motion detection turned OFF manually.");
+    }
+    else if (msg == "MOTION ON") {
+        motionManualOverride = true;
+        motionManuallyEnabled = true;
+        if (!fromMQTT) sendSMS("Motion detection turned ON manually.");
+    }
+    else if (msg == "MOTION AUTO") {
+        motionManualOverride = false;
+        if (!fromMQTT) sendSMS("Motion detection back to auto schedule.");
+    }
+
+    // ───── Fire System & Mains Control ─────
+    else if (msg == "FIRE ON") {
+        ESPNowHandler_sendCommand("FIRE_SYSTEM_ON");
+        if (!fromMQTT) sendSMS("Fire system activated.");
+    }
+    else if (msg == "FIRE OFF") {
+        ESPNowHandler_sendCommand("FIRE_SYSTEM_OFF");
+        if (!fromMQTT) sendSMS("Fire system deactivated.");
+    }
+    else if (msg == "MAINS OFF") {
+        ESPNowHandler_sendCommand("OFF_APPLIANCE");
+        if (!fromMQTT) sendSMS("Main supply turned OFF.");
+    }
+    else if (msg == "MAINS ON") {
+        ESPNowHandler_sendCommand("ON_APPLIANCE");
+        if (!fromMQTT) sendSMS("Main supply turned ON.");
+    }
+
+    // ───── System Mode Switch ─────
+    else if (msg == "MODE GSM") {
+        setSystemMode(MODE_GSM_ONLY);
+        if (!fromMQTT) sendSMS("System mode: GSM_ONLY. Restarting...");
+    }
+    else if (msg == "MODE WIFI") {
+        setSystemMode(MODE_WIFI_ONLY);
+        if (!fromMQTT) sendSMS("System mode: WIFI_ONLY. Restarting...");
+    }
+    else if (msg == "MODE BOTH") {
+        setSystemMode(MODE_BOTH);
+        if (!fromMQTT) sendSMS("System mode: BOTH. Restarting...");
+    } else if (msg == "MODE") {
+        if (currentSystemMode == MODE_GSM_ONLY) setDashboardMode("GSM_ONLY_ACTIVE");
+        else if (currentSystemMode == MODE_WIFI_ONLY) setDashboardMode("WIFI_ONLY_ACTIVE");
+        else setDashboardMode("BOTH_ACTIVE");
+        if (!fromMQTT) sendSMS("System mode: BOTH. Restarting...");
+    }
+
+    // ───── Restart ─────
+    else if (msg == "REBOOT") {
+        if (!fromMQTT) sendSMS("Restarting ESP...");
+        ESP.restart();
+    }
+
+    else {
+        Serial.println("Unknown or unsupported command.");
+        if (!fromMQTT) sendSMS("Unknown command.");
+    }
 }
 
+// Optional forwarding to HTTP log server
 void myPrint(String text) {
   Serial.println(text);
   sendSerialLogToServer(text);

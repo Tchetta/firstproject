@@ -7,13 +7,15 @@
 #include "current/current.h"
 #include "http/http_app.h"
 #include "flame/flame.h"
-#include "pir_motion/pir.h"
+// #include "pir_motion/pir.h"
 #include "mqtt/mqtt.h" // <--- Include the new MQTT header
 #include <Preferences.h> // For NVS (Non-Volatile Storage)
 #include <nvs_flash.h> // <--- THIS IS THE MISSING INCLUDE!
 #include "esp_now/esp_now_handler.h"
 #include <ESP_Mail_Client.h>
 #include <HTTPClient.h>
+#include <ThreeWire.h>
+#include <RtcDS1302.h>
 
 /** The smtp host name e.g. smtp.gmail.com for GMail or smtp.office365.com for Outlook or smtp.mail.yahoo.com */
 #define SMTP_HOST "smtp.gmail.com"
@@ -38,10 +40,61 @@ bool sendHtmlEmail(const char* recipient, const char* subject, const char* htmlC
 
 // digital pins
 #define dhtPin 19
-#define CURRENT_PIN 32
+// #define CURRENT_PIN 32
 #define FLAME_PIN 35
-#define PIR_SENSOR_PIN 2
-#define ALERT_PIN 4
+#define PIR_SENSOR_PIN 4
+#define ALERT_PIN 2
+#define PIRtimeSeconds 3
+// const int led = 21;
+
+// === Sensor Mute and Manual Overrides ===
+/* struct SensorMuteStatus {
+    bool motion = false;
+    bool fire = false;
+    bool gas = false;
+    bool voltage = false;
+    bool temperature = false;
+}; */
+SensorMuteStatus mutedSensors;
+
+bool motionManualOverride = false;
+bool motionManuallyEnabled = false;
+
+bool alarmManualOverride = false;
+bool alarmManuallyEnabled = true; // default true
+
+
+// ================== MOTION ===================
+// Timer: Auxiliary variables
+unsigned long nowMotion = millis();
+unsigned long lastTrigger = 0;
+boolean startTimer = false;
+boolean motion = false;
+
+volatile bool motionInterruptTriggered = false;
+// bool motionEventDetected = false;
+
+// Checks if motion was detected, sets LED HIGH and starts a timer
+void IRAM_ATTR detectsMovement() {
+  motionInterruptTriggered = true;
+  startTimer = true;
+  lastTrigger = millis();
+  digitalWrite(13, HIGH);
+}
+
+/* volatile unsigned long lastInterruptTime = 0;
+const unsigned long DEBOUNCE_TIME = 300; // milliseconds
+
+void IRAM_ATTR detectsMovement() {
+  unsigned long currentTime = millis();
+  if (currentTime - lastInterruptTime > DEBOUNCE_TIME) {
+    motionInterruptTriggered = true;
+    
+    digitalWrite(13, HIGH);
+    lastInterruptTime = currentTime;
+  }
+} */
+
 
 // analog pins
 // #define MQ2_PIN 34
@@ -86,6 +139,9 @@ const unsigned long TIME_LOCATION_CHECK_INTERVAL = 30000; // Check every 30 seco
 unsigned long lastEmailAlertTime = 0;
 const unsigned long EMAIL_ALERT_INTERVAL = 5 * 60 * 1000; // 5 minutes in milliseconds
 
+// --- NEW GLOBAL FOR MANUAL ALARM OVERRIDE ---
+bool manualAlarmOverride = false; // Controls alarm state by SMS/MQTT commands
+
 // In gsm.cpp, ensure checkForIncomingSMS calls this global handleIncomingCommand
 // In mqtt.cpp, ensure handleMqttCommand calls this global handleIncomingCommand
 
@@ -96,6 +152,14 @@ uint8_t SENSOR_PEER_MAC_ADDRESS[] = {0x44, 0x17, 0x93, 0xf9, 0x71, 0x04};
 
 // Global variable to store the last received sensor voltage
 volatile float g_lastReceivedVoltage = 0.0;
+
+const int IO = 23;
+const int SCLK = 14;
+const int CE = 25;
+ThreeWire myWire(IO, SCLK, CE);
+RtcDS1302<ThreeWire> Rtc(myWire);
+
+bool rtcOnTime = false;
 
 /**
  * @brief Callback function to store received sensor data from ESP-NOW into a global variable.
@@ -158,10 +222,36 @@ void setup_wifi() {
     }
 }
 
+// ------------------- GSM RTC Time parse -------------------
+
+RtcDateTime parseGSMDateTime(String gsmTimeStr) {
+  // Expected format: "YYYY-MM-DD HH:MM:SS"
+  int year = gsmTimeStr.substring(0, 4).toInt();
+  int month = gsmTimeStr.substring(5, 7).toInt();
+  int day = gsmTimeStr.substring(8, 10).toInt();
+  int hour = gsmTimeStr.substring(11, 13).toInt();
+  int minute = gsmTimeStr.substring(14, 16).toInt();
+  int second = gsmTimeStr.substring(17, 19).toInt();
+
+  return RtcDateTime(year, month, day, hour, minute, second);
+}
+
+#define countof(a) (sizeof(a) / sizeof(a[0]))
+
+void printDateTime(const RtcDateTime& dt) {
+  char datestring[20];
+  snprintf_P(datestring, countof(datestring),
+             PSTR("%02u/%02u/%04u %02u:%02u:%02u"),
+             dt.Month(), dt.Day(), dt.Year(),
+             dt.Hour(), dt.Minute(), dt.Second());
+  Serial.print(datestring);
+}
+
 // ------------------- Setup and Loop -------------------
 void setup()
 {
     pinMode(4, OUTPUT);
+    pinMode(13, OUTPUT);
     Serial.begin(115200);
     Serial.println();
     String thisBoard = ARDUINO_BOARD;
@@ -193,28 +283,32 @@ void setup()
     else if (currentSystemMode == MODE_WIFI_ONLY) Serial.println("WIFI_ONLY");
     else Serial.println("BOTH WiFi and GSM");
 
-    Serial.println("Starting esp_now");
-
-    // Initialize ESP-NOW handler with the sensor's MAC address
-    if (!ESPNowHandler_init(SENSOR_PEER_MAC_ADDRESS)) {
-        Serial.println("Failed to initialize ESP-NOW handler. Halting.");
-        esp_now = false;
-    } else {
-        Serial.print("ESP-NOW successfully initialised on Channel.");
-        Serial.println(WiFi.channel());
-        esp_now = true;
-    }
-
-    // Assign the callback for received ESP-NOW data to our new function
-    onSensorDataReceivedCallback = storeReceivedSensorData;
-    Serial.println("esp_now started");
-
-    setupPIR(PIR_SENSOR_PIN);
+    // setupPIR(PIR_SENSOR_PIN);
     dhtSetup(dhtPin);
     setupFlame();
-    setCurrentPin(CURRENT_PIN);
+    // setCurrentPin(CURRENT_PIN);
     initGasSensor();
     pinMode(ALERT_PIN, OUTPUT);
+
+    Rtc.Begin();
+    if (!Rtc.IsDateTimeValid()) {
+        Rtc.SetDateTime(RtcDateTime(__DATE__, __TIME__));
+    }
+
+    if (Rtc.GetIsWriteProtected()) {
+        Rtc.SetIsWriteProtected(false);
+    }
+    if (!Rtc.GetIsRunning()) {
+        Rtc.SetIsRunning(true);
+    }
+    if (Rtc.GetDateTime() < RtcDateTime(__DATE__, __TIME__)) {
+        Rtc.SetDateTime(RtcDateTime(__DATE__, __TIME__));
+    }
+
+    RtcDateTime nowSetup = Rtc.GetDateTime(); 
+
+    printDateTime(nowSetup);
+    Serial.println();
 
     // If WiFi is part of the current mode
     if (currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) {
@@ -228,7 +322,7 @@ void setup()
             // --- DYNAMIC IP DISCOVERY FOR MQTT BROKER ---
             IPAddress ip = WiFi.localIP();
             // Construct the broker's IP using the ESP32's current subnet and the known last octet (.100)
-            IPAddress mqttBrokerIp(ip[0], ip[1], ip[2], 241); // Create an IPAddress object directly
+            IPAddress mqttBrokerIp(ip[0], ip[1], ip[2], 240); // Create an IPAddress object directly
             Serial.print("Derived MQTT Broker IP: ");
             Serial.println(mqttBrokerIp); // Print the IPAddress object
             mqttSetup(mqttBrokerIp, mqtt_port); // Setup MQTT client with dynamic IP
@@ -236,35 +330,44 @@ void setup()
             // =============================== EMAIL =====================================
             // ONLY attempt email setup if there is an internet connection
             if (checkInternetConnection()) {
+                configTime(3600, 0, "pool.ntp.org", "time.nist.gov");
+                struct tm timeinfo;
+                if (getLocalTime(&timeinfo)) {
+                RtcDateTime ntpTime = RtcDateTime(1900 + timeinfo.tm_year, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+                                                    timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+                Rtc.SetDateTime(ntpTime);
+                rtcOnTime = true;
+                }
+
                 Serial.println("Internet available, setting up email client.");
                 publishInfo("Internet available, setting up email client."); // Publish internet status
-                /* Set the network reconnection option */
+                // * Set the network reconnection option 
                 MailClient.networkReconnect(true);
                 /** Enable the debug via Serial port
-                * 0 for no debugging
+                * / 0 for no debugging
                 * 1 for basic level debugging
                 */
                 smtp.debug(1);
 
-                /* Set the callback function to get the sending results */
+                // Set the callback function to get the sending results 
                 smtp.callback(smtpCallback);
 
-                /* Declare the Session_Config for user defined session credentials */
+                // * Declare the Session_Config for user defined session credentials 
                 Session_Config config;
 
-                /* Set the session config */
+                // * Set the session config 
                 config.server.host_name = SMTP_HOST;
                 config.server.port = SMTP_PORT;
                 config.login.email = AUTHOR_EMAIL;
                 config.login.password = AUTHOR_PASSWORD;
                 config.login.user_domain = "";
 
-                /* Set the NTP config time */
+                // Set the NTP config time 
                 config.time.ntp_server = F("pool.ntp.org,time.nist.gov");
                 config.time.gmt_offset = 1;
                 config.time.day_light_offset = 0;
 
-                /* Connect to the server */
+                // * Connect to the server 
                 if (!smtp.connect(&config)){
                     ESP_MAIL_PRINTF("Email connection error, Status Code: %d, Error Code: %d, Reason: %s", smtp.statusCode(), smtp.errorCode(), smtp.errorReason().c_str());
                 } else {
@@ -294,36 +397,90 @@ void setup()
             Serial.println("GSM connected!");
             myPrint("🌍 ESP32 successfully connected via gsm!");
             sendSMS("ESP32 successfully connected via gsm!");
+            if (!rtcOnTime) {
+                Serial.println("Setting RTC time to GSM time...");
+                String gsmTime = getNetworkTime();
+                if (gsmTime != "N/A") {
+                    RtcDateTime gsmDateTime = parseGSMDateTime(gsmTime);
+                    Rtc.SetDateTime(gsmDateTime);
+                    Serial.println("RTC time successfully set to GSM time!");
+                } else {
+
+                }
+            } else {
+                Serial.println("Cannot set RTC time to GSM time!");
+            }
         } else {
             Serial.println("GSM NOT connected!");
             myPrint("⚠️ ESP32 NOT connected via gsm!");
         }
     }
+    
+   if (currentSystemMode == MODE_GSM_ONLY && isGSMReady()) sendSMS("GSM_ONLY_ACTIVE");
+   else {
+    if (WiFi.status() == WL_CONNECTED) {
+        if (currentSystemMode == MODE_WIFI_ONLY) {
+            setDashboardMode("WIFI_ONLY_ACTIVE");
+            Serial.println("WIFI_ONLY_ACTIVE");
+        } else {
+            setDashboardMode("BOTH_ACTIVE");
+            Serial.println("WIFI_ONLY_ACTIVE");
+        }
+    }
+   }
+
+   Serial.println("Starting esp_now");
+
+    // Initialize ESP-NOW handler with the sensor's MAC address
+    if (!ESPNowHandler_init(SENSOR_PEER_MAC_ADDRESS)) {
+        Serial.println("Failed to initialize ESP-NOW handler. Halting.");
+        esp_now = false;
+    } else {
+        Serial.print("ESP-NOW successfully initialised on Channel.");
+        Serial.println(WiFi.channel());
+        esp_now = true;
+    }
+
+    // Assign the callback for received ESP-NOW data to our new function
+    onSensorDataReceivedCallback = storeReceivedSensorData;
+    Serial.println("esp_now started");
+
+    /* pinMode(PIR_SENSOR_PIN, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(PIR_SENSOR_PIN), detectsMovement, RISING); */
 
     // After initial setup, inform dashboard about the mode
-    if (currentSystemMode == MODE_GSM_ONLY) sendSMS("GSM_ONLY_ACTIVE");
-    else if (currentSystemMode == MODE_WIFI_ONLY) setDashboardMode("WIFI_ONLY_ACTIVE");
-    else setDashboardMode("BOTH_ACTIVE");
 
-    digitalWrite(4, LOW);
 
 }
 
+bool isMotionAllowedNow() {
+    RtcDateTime nowTime = Rtc.GetDateTime();
+    int hour = nowTime.Hour();
+    bool blockedByTime = (hour >= 9 && hour < 15);
+    // bool blockedByTime = false;
+    if (motionManualOverride)
+        return motionManuallyEnabled;
+    return !blockedByTime;
+
+    // return true;
+}
+
+unsigned long lastInternetCheck = 0;
+const unsigned long internetCheckInterval = 90000;
+bool internetAvailable = false;
+
 void loop()
 {
+    nowMotion = millis();
 
-    // --- Handle MQTT (if WiFi enabled) ---
-    // MQTT connection should be independent of internet connection if broker is local
-    if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED) {
-        mqttLoop(); // This calls client.loop() and non-blocking reconnect
+    unsigned long nowInternet = millis();
+    if (nowInternet - lastInternetCheck > internetCheckInterval) {
+        internetAvailable = checkInternetConnection();
+        lastInternetCheck = nowInternet;
     }
 
-
-    // --- Handle GSM SMS reception ---
-    if (currentSystemMode == MODE_GSM_ONLY || currentSystemMode == MODE_BOTH) {
-        checkForIncomingSMS(); // Check for SMS commands
-    }
-
+    // --- Centralized Alarm Management ---
+    bool activateAlarm = false; // Flag to determine if the ALERT_PIN should be HIGH
     // --- Declare sensor variables at the start of loop for broader scope ---
     static float temperature = -1.0F;
     static float humidity = -1.0F;
@@ -332,9 +489,73 @@ void loop()
     static float gasCO = -1.0F;
     static float gasSmoke = -1.0F;
     static int fire = -1;
-    static bool motion = false;
+    // static bool motion = false;
     static float rms_Voltage = -1.0F;
 
+    // --- Handle GSM SMS reception ---
+    if (currentSystemMode == MODE_GSM_ONLY || currentSystemMode == MODE_BOTH) {
+        checkForIncomingSMS(); // Check for SMS commands
+    }
+
+    // ========================= motion
+    /* if (motionInterruptTriggered && (motion == false)) {
+        Serial.println("🚨 motionInterruptTriggered = true");
+        motionInterruptTriggered = false;
+
+        if (!mutedSensors.motion && isMotionAllowedNow()) {
+            motion = true;
+            lastMotionAlert = millis();
+
+            Serial.println("🚶 Motion Detected!");
+
+            activateAlarm = true;
+            // ESPNowHandler_sendCommand("ALARM_ON");
+
+            if (currentSystemMode == MODE_GSM_ONLY || currentSystemMode == MODE_BOTH) {
+                if (isGSMReady()) {
+                    sendSMS("🚶 Motion detected in the house!");
+                }
+            }
+
+            if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) &&
+                WiFi.status() == WL_CONNECTED &&
+                (millis() - lastEmailAlertTime >= EMAIL_ALERT_INTERVAL) &&
+                internetAvailable) {
+
+                sendHtmlEmail(RECIPIENT_EMAIL, "Motion Alert!",
+                            "<h1>Motion Detected</h1><p>Activity detected at home.</p>");
+                lastEmailAlertTime = millis();
+            }
+
+            // 🔥❌ Remove this from here:
+            publishSensorData(true, fire, temperature, humidity, gasLPG, gasCO, gasSmoke, rms_Voltage);
+            // because those values are stale.
+        } else {
+            Serial.println("⚠️ Motion detected but ignored (muted or not allowed now).");
+        }
+    }
+
+    if (startTimer && motion && (nowMotion - lastTrigger > PIRtimeSeconds * 1000)) {
+        Serial.println("✅ Motion period ended. Resetting...");
+        motion = false;
+        startTimer = false;
+        motionInterruptTriggered = false;
+        digitalWrite(13, LOW);
+
+        if (!manualAlarmOverride) { // only turn off if not manually forced ON
+            digitalWrite(ALERT_PIN, LOW);
+            ESPNowHandler_sendCommand("ALARM_OFF");
+            publishInfo("Motion cleared. Alarm OFF");
+        }
+
+        publishSensorData(false, fire, temperature, humidity, gasLPG, gasCO, gasSmoke, rms_Voltage);
+    } */
+
+    // --- Handle MQTT (if WiFi enabled) ---
+    // MQTT connection should be independent of internet connection if broker is local
+   if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED) {
+        mqttLoop(); // This calls client.loop() and non-blocking reconnect
+    }
 
     // --- Sensor Readings and Publishing/Alerting ---
     unsigned long now = millis();
@@ -343,12 +564,11 @@ void loop()
 
         temperature = getTemperatureDEG();
         humidity = getHumidity();
-        current = currentValue(CURRENT_PIN);
+        // current = currentValue(CURRENT_PIN);
         gasLPG = readGasLPG();
         gasCO = readGasCO();
         gasSmoke = readGasSmoke();
         fire = analogFlamePercent(FLAME_PIN);
-        motion = isMotionDetected(); // This is non-blocking with its own internal timer
 
         rms_Voltage = g_lastReceivedVoltage; // Get the latest ESP-NOW voltage
         Serial.print("Voltage: ");
@@ -356,254 +576,232 @@ void loop()
 
         temperature = isnan(temperature) ? -1.0F : temperature;
         humidity = isnan(humidity) ? -1.0F : humidity;
-        current = currentValue(CURRENT_PIN);
-       /*  gasLPG = (0 > gasLPG || gasLPG > 100 || isnan(gasLPG)) ? -1.0F : gasLPG;
-        gasCO = (0 > gasCO || gasCO > 200 || isnan(gasCO)) ? -1.0F : gasCO;
-        gasSmoke = (0 > gasSmoke || gasSmoke > 3700 || isnan(gasSmoke)) ? -1.0F : gasSmoke; */
+        // Removed redundant current = currentValue(CURRENT_PIN);
+        gasLPG = (gasLPG < 0 || isnan(gasLPG)) ? -1.0F : gasLPG; // Assuming 0 is minimum valid for LPG
+        gasCO = (gasCO < 0 || isnan(gasCO)) ? -1.0F : gasCO;     // Assuming 0 is minimum valid for CO
+        gasSmoke = (gasSmoke < 0 || isnan(gasSmoke)) ? -1.0F : gasSmoke; // Assuming 0 is minimum valid for Smoke
         fire = fire == 47 ? -1 : fire; // Corrected to use -1 for invalid fire readings
-        motion = isMotionDetected(); // This is non-blocking with its own internal timer
-        // rms_Voltage = (((g_lastReceivedVoltage <= 20.0 || g_lastReceivedVoltage >= 300.0) && g_lastReceivedVoltage != 1118.08) || isnan(g_lastReceivedVoltage)) ? -1.0F : g_lastReceivedVoltage;
-        rms_Voltage = (isnan(g_lastReceivedVoltage)) ? -1.0F : g_lastReceivedVoltage;
+        // rms_Voltage = (isnan(g_lastReceivedVoltage)) ? -1.0F : g_lastReceivedVoltage;
+        // High/Low Voltage Alert
+        // --- Voltage Validation and Categorization ---
+        if (!isnan(g_lastReceivedVoltage)) {
+            rms_Voltage = g_lastReceivedVoltage;
 
+            // Clamp invalid readings
+            if (rms_Voltage < 20) {
+                rms_Voltage = 0.0;
+            } else if (rms_Voltage > 1000 || rms_Voltage == -1.0) {
+                rms_Voltage = -2.0; // Custom marker for invalid
+            }
+        } else {
+            rms_Voltage = -1.0F; // Sensor error
+        }
+
+        // ========================= motion
+
+        /* if (startTimer && (nowMotion - lastTrigger > PIRtimeSeconds * 1000)) {
+            Serial.println("✅ Motion period ended. Resetting...");
+            motion = false;
+            startTimer = false;
+            motionInterruptTriggered = false;
+            digitalWrite(13, LOW);
+
+            if (!manualAlarmOverride) { // only turn off if not manually forced ON
+                digitalWrite(ALERT_PIN, LOW);
+                ESPNowHandler_sendCommand("ALARM_OFF");
+                publishInfo("Motion cleared. Alarm OFF");
+            }
+
+            publishSensorData(false, fire, temperature, humidity, gasLPG, gasCO, gasSmoke, rms_Voltage);
+        } */
+        
         // Publish sensor data via MQTT if WiFi is enabled and connected
-        // This remains outside the internet check as MQTT is local
         if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED) {
             publishSensorData(motion, fire, temperature, humidity, gasLPG, gasCO, gasSmoke, rms_Voltage);
         }
-
-        // Send sensor data via HTTP if WiFi is enabled and connected AND MQTT is not preferred or fails
-        // Consider if your HTTP endpoint is local or external. If local, it also doesn't need internet.
-        // If external, add an internet check. Assuming it might be for a local dashboard.
-        // if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED) {
-        //   if (!isnan(temperature) && !isnan(humidity)) {
-        //     sendSensorReadings(motion, fire, temperature, humidity, gasLPG, gasCO, gasSmoke);
-        //   }
-        // }
-
-        // --- Alerting Logic (via GSM or Serial/MQTT if GSM not ready) ---
-        // Make sure these calls don't block for too long.
-        // sendSMS is blocking, so we need to be careful.
-        // If GSM is not ready, consider publishing to MQTT for alerts if WiFi is active.
-
-        // Motion Alert
-        if (motion && now - lastMotionAlert > motionAlertInterval) {
-            lastMotionAlert = now;
-            digitalWrite(ALERT_PIN, HIGH);
-            if (currentSystemMode == MODE_GSM_ONLY || currentSystemMode == MODE_BOTH) {
-                if (isGSMReady()) {
-                    sendSMS("🚶 Motion detected in the house!");
-                    // myPrint("🚶 Motion detected in the house!"); // This also calls HTTP
-                } else {
-                    // Fallback if GSM not ready in BOTH mode, or for WIFI_ONLY mode
-                    Serial.println("🚶 Motion detected (GSM not ready, or WiFi only).");
-                    if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED) {
-                        if (publishSensorData(motion, fire, temperature, humidity, gasLPG, gasCO, gasSmoke, rms_Voltage)) { // Re-publish all data with motion
-                               
-                        }
-                        if (checkInternetConnection()) {
-                            sendHtmlEmail(RECIPIENT_EMAIL, "Motion Alert!", "<h1>Urgent: Motion Detected!</h1><p>Motion has been detected in your smart home. Please check your dashboard.</p>");
-                        }
-                    }
-                }
-            }
-            // --- Send Email Alert for Motion if WiFi & Internet are active ---
-            if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED && now - lastEmailAlertTime >= EMAIL_ALERT_INTERVAL) {
-                if (publishSensorData(motion, fire, temperature, humidity, gasLPG, gasCO, gasSmoke, rms_Voltage)) { // Re-publish all data with motion
-                    // Optionally publish a specific alert message
-                    // client.publish("smart_home/alerts", "Motion Detected!");
-                }
-                if (checkInternetConnection()) {
-                    sendHtmlEmail(RECIPIENT_EMAIL, "Motion Alert!", "<h1>Urgent: Motion Detected!</h1><p>Motion has been detected in your smart home. Please check your dashboard.</p>");
-                }
-                lastEmailAlertTime = now; // Reset email cooldown timer
-            }
-        } else {
-            digitalWrite(ALERT_PIN, LOW);
-            publishInfo("Alarm turned off!");
-            sendSMS("Alarm turned off!");
-        }
-
-
+        
         // Fire Alert
-        if (fire > 10 && now - lastFireAlert > fireAlertInterval) { // Assuming 'fire > 10' means fire detected
+        if (fire > 10 && (now - lastFireAlert > fireAlertInterval)) { // Assuming 'fire > 10' means fire detected
             lastFireAlert = now;
-            ESPNowHandler_sendCommand("FIRE_SYSTEM_ON");
+            activateAlarm = true; // Fire detected, activate alarm
+            ESPNowHandler_sendCommand("ALARM_ON");
+            ESPNowHandler_sendCommand("FIRE_SYSTEM_ON"); // Turn on fire system regardless of communication mode
             if (currentSystemMode == MODE_GSM_ONLY || currentSystemMode == MODE_BOTH) {
                 if (isGSMReady()) {
                     sendSMS("🔥Fire detected!");
-                    digitalWrite(ALERT_PIN, HIGH);
                 } else {
                     Serial.println("🔥 Fire detected (GSM not ready, or WiFi only).");
-                    if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED) {
-                        if (publishSensorData(motion, fire, temperature, humidity, gasLPG, gasCO, gasSmoke, rms_Voltage)) { // Re-publish all data with motion
-                               
-                        }
-                        if (checkInternetConnection()) {
-                            sendHtmlEmail(RECIPIENT_EMAIL, "Fire Alert!", "<h1>Critical: Fire Detected!</h1><p>Fire has been detected in your smart home. Please check your dashboard.</p>");
-                        }
-                    }
-                    digitalWrite(ALERT_PIN, LOW);
                 }
             }
-            // --- Send Email Alert for Fire if WiFi & Internet are active ---
-            if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED) {
-                if (checkInternetConnection() && now - lastEmailAlertTime >= EMAIL_ALERT_INTERVAL) {
+            if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED && (now - lastEmailAlertTime >= EMAIL_ALERT_INTERVAL)) {
+                if (internetAvailable) {
                     sendHtmlEmail(RECIPIENT_EMAIL, "Fire Alert!", "<h1>Critical: Fire Detected!</h1><p>A fire has been detected in your smart home. Take immediate action!</p>");
-                    lastEmailAlertTime = now; // Reset email cooldown timer
+                    lastEmailAlertTime = now;
                 }
             }
-        } else {
-            digitalWrite(ALERT_PIN, LOW);
-            ESPNowHandler_sendCommand("FIRE_SYSTEM_OFF");
-            publishInfo("Alarm turned off!");
+        } else if (fire <= 10) { // If fire is no longer detected, turn off fire system
+             ESPNowHandler_sendCommand("FIRE_SYSTEM_OFF");
         }
-        // High Voltage Alert
-        if ((rms_Voltage > 230 || rms_Voltage < 100) && now - lastRms_VoltageAlert > rms_VoltageAlertInterval) {
-            ESPNowHandler_sendCommand("OFF_APPLIANCE");
+
+        // --- Voltage-Based Appliance Control ---
+        if ((rms_Voltage == 0.0 || rms_Voltage == -2.0 || rms_Voltage < 100 || rms_Voltage > 230) &&
+            rms_Voltage != -1.0F &&
+            (now - lastRms_VoltageAlert > rms_VoltageAlertInterval)) {
+
             lastRms_VoltageAlert = now;
-            if (currentSystemMode == MODE_GSM_ONLY || currentSystemMode == MODE_BOTH) {
-                if (isGSMReady()) {
-                    String voltage_msg = "High or Low Voltage at home - !";
-                       voltage_msg += String(rms_Voltage);
-                       voltage_msg += " volts";
-                       voltage_msg += "\n Device Turned OFF";
-                       voltage_msg += "\n Send ON APPLIANCE to turn it ON.";
-                    sendSMS(voltage_msg);
-                    // myPrint(voltage_msg);
-                    digitalWrite(ALERT_PIN, HIGH);
-                } else {
-                    String email_subject = "Voltage Alert!";
-                    String email_content = "<h1>Urgent: High/Low Voltage!</h1><p>Abnormal voltage detected: ";
-                    email_content += String(rms_Voltage);
-                    email_content += " volts. Appliance might be turned off.</p>";
-                    if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED) {
-                        // client.publish("smart_home/alerts", "Fire Detected!");
-                        if (checkInternetConnection() && now - lastEmailAlertTime >= EMAIL_ALERT_INTERVAL) {
-                            sendHtmlEmail(RECIPIENT_EMAIL, "Voltage Alert!", email_content.c_str());
-                            lastEmailAlertTime = now; // Reset email cooldown timer
-                        }
-                    }
+            ESPNowHandler_sendCommand("OFF_APPLIANCE"); // Turn off regardless of type
+
+            // GSM
+            if ((currentSystemMode == MODE_GSM_ONLY || currentSystemMode == MODE_BOTH) && isGSMReady()) {
+                String voltage_msg = "";
+
+                if (rms_Voltage == 0.0) {
+                    voltage_msg += "⚡ No electricity detected (0V). Appliance turned OFF.";
+                } else if (rms_Voltage == -2.0 || rms_Voltage == -1.0) {
+                    voltage_msg += "⚠️ Invalid voltage reading (above 1000V). Appliance turned OFF.";
+                } else if (rms_Voltage < 100) {
+                    voltage_msg += "⚠️ Voltage too low - ";
+                    voltage_msg += String(rms_Voltage);
+                    voltage_msg += "V. Appliance turned OFF.";
+                } else if (rms_Voltage > 230) {
+                    voltage_msg += "⚠️ High voltage - ";
+                    voltage_msg += String(rms_Voltage);
+                    voltage_msg += "V. Appliance turned OFF.";
                 }
+
+                sendSMS(voltage_msg);
             }
-            // --- Send Email Alert for Voltage if WiFi & Internet are active ---
-            if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED && checkInternetConnection() && now - lastEmailAlertTime >= EMAIL_ALERT_INTERVAL) {
-                String email_subject = "Voltage Alert!";
-                String email_content = "<h1>Urgent: High/Low Voltage!</h1><p>Abnormal voltage detected: ";
-                email_content += String(rms_Voltage);
-                email_content += " volts. Appliance might be turned off.</p>";
-                sendHtmlEmail(RECIPIENT_EMAIL, email_subject.c_str(), email_content.c_str());
-                lastEmailAlertTime = now; // Reset email cooldown timer
+
+            // Email (if not recently sent)
+            // EMAIL
+            if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) &&
+                WiFi.status() == WL_CONNECTED &&
+                (now - lastEmailAlertTime >= EMAIL_ALERT_INTERVAL) &&
+                internetAvailable) {
+
+                String email_msg = "<h1>Voltage Alert!</h1><p>";
+
+                if (rms_Voltage == 0.0) {
+                    email_msg += "⚡ No electricity detected (0V). Appliance has been turned OFF.";
+                } else if (rms_Voltage == -2.0) {
+                    email_msg += "⚠️ Invalid voltage reading (above 1000V). Appliance has been turned OFF.";
+                } else if (rms_Voltage < 100) {
+                    email_msg += "⚠️ Voltage too low: ";
+                    email_msg += String(rms_Voltage);
+                    email_msg += "V. Appliance has been turned OFF.";
+                } else if (rms_Voltage > 230) {
+                    email_msg += "⚠️ High voltage: ";
+                    email_msg += String(rms_Voltage);
+                    email_msg += "V. Appliance has been turned OFF.";
+                }
+
+                email_msg += "</p>";
+
+                sendHtmlEmail(RECIPIENT_EMAIL, "Voltage Alert!", email_msg.c_str());
+                lastEmailAlertTime = now;
             }
-        } else {
+
+        } else if (rms_Voltage >= 100 && rms_Voltage <= 230 && rms_Voltage != -1.0F) {
+            // Voltage OK, turn ON appliance
             ESPNowHandler_sendCommand("ON_APPLIANCE");
-         
-            digitalWrite(ALERT_PIN, LOW);
         }
-        
 
         // High Temperature Alert (45-65 degC)
-        if (temperature >= 45.0 && temperature < 65.0 && now - lastHeatAlert > heatAlertInterval) {
+        if (temperature >= 45.0 && temperature < 65.0 && (now - lastHeatAlert > heatAlertInterval)) {
             lastHeatAlert = now;
+            activateAlarm = true; // High temp, activate alarm
+            ESPNowHandler_sendCommand("ALARM_ON");
+
             if (currentSystemMode == MODE_GSM_ONLY || currentSystemMode == MODE_BOTH) {
                 if (isGSMReady()) {
                     sendSMS("🔥Home is too hot");
-                    digitalWrite(ALERT_PIN, HIGH);
                 } else {
-                    myPrint("🔥 Home is too hot (GSM not ready, or WiFi only).");
-                    if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED) {
-                        // client.publish("smart_home/alerts", "High Temperature!");
-                        String email_content = "<h1>Alert: High Temperature!</h1><p>The temperature in your home is ";
-                        email_content += String(temperature);
-                        email_content += " &deg;C. It's getting hot!</p>";
-                        // sendHtmlEmail(RECIPIENT_EMAIL, "High Temperature Alert!", email_content.c_str());
-                        if (checkInternetConnection() && now - lastEmailAlertTime >= EMAIL_ALERT_INTERVAL) {
-                            sendHtmlEmail(RECIPIENT_EMAIL, "Heat Alert!", email_content.c_str());
-                            lastEmailAlertTime = now; // Reset email cooldown timer
-                        }
-                    }
-                    digitalWrite(ALERT_PIN, LOW);
+                    Serial.print("🔥 Home is too hot (GSM not ready, or WiFi only): ");
+                    Serial.println(temperature);
                 }
             }
-            // --- Send Email Alert for High Temp if WiFi & Internet are active ---
-            if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED && checkInternetConnection() && now - lastEmailAlertTime >= EMAIL_ALERT_INTERVAL) {
-                String email_content = "<h1>Alert: High Temperature!</h1><p>The temperature in your home is ";
-                email_content += String(temperature);
-                email_content += " &deg;C. It's getting hot!</p>";
-                sendHtmlEmail(RECIPIENT_EMAIL, "High Temperature Alert!", email_content.c_str());
-                lastEmailAlertTime = now; // Reset email cooldown timer
+            if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED && (now - lastEmailAlertTime >= EMAIL_ALERT_INTERVAL)) {
+                if (internetAvailable) {
+                    String email_content = "<h1>Alert: High Temperature!</h1><p>The temperature in your home is ";
+                    email_content += String(temperature);
+                    email_content += " &deg;C. It's getting hot!</p>";
+                    sendHtmlEmail(RECIPIENT_EMAIL, "High Temperature Alert!", email_content.c_str());
+                    lastEmailAlertTime = now;
+                }
             }
         }
 
-        // Smoke Alert
-        if ((gasSmoke >= 1000.0 || gasCO >= 150 || gasLPG >= 75) && now - lastSmokeAlert > smokeAlertInterval) { // Assuming 1000.0 is a threshold
+        // Smoke/Gas Alert
+        if ((gasSmoke >= 900.0 || gasCO >= 150 || gasLPG >= 55) && (now - lastSmokeAlert > smokeAlertInterval)) {
             lastSmokeAlert = now;
-            digitalWrite(ALERT_PIN, HIGH);
+            activateAlarm = true; // Gas/Smoke detected, activate alarm
+            ESPNowHandler_sendCommand("ALARM_ON");
+
             if (currentSystemMode == MODE_GSM_ONLY || currentSystemMode == MODE_BOTH) {
                 if (isGSMReady()) {
                     sendSMS("🔥Gas or Smoke detected");
                 } else {
                     Serial.println("🔥 Gas or Smoke detected (GSM not ready, or WiFi only).");
-                    if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED) {
-                        // client.publish("smart_home/alerts", "Smoke Detected!");
-                        if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED && checkInternetConnection() && now - lastEmailAlertTime >= EMAIL_ALERT_INTERVAL) {
-                            sendHtmlEmail(RECIPIENT_EMAIL, "Smoke Alert!", "<h1>Critical: Abnormal gas or Smoke Detected!</h1><p>Smoke has been detected in your smart home. Investigate immediately!</p>");
-                            lastEmailAlertTime = now; // Reset email cooldown timer
-                        }
-                    }
                 }
             }
-            // --- Send Email Alert for Smoke if WiFi & Internet are active ---
-            if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED) {
-                if (checkInternetConnection() && now - lastEmailAlertTime >= EMAIL_ALERT_INTERVAL) {
+            if ((currentSystemMode == MODE_WIFI_ONLY || currentSystemMode == MODE_BOTH) && WiFi.status() == WL_CONNECTED && (now - lastEmailAlertTime >= EMAIL_ALERT_INTERVAL)) {
+                if (internetAvailable) {
                     sendHtmlEmail(RECIPIENT_EMAIL, "Smoke Alert!", "<h1>Critical: Abnormal gas or Smoke Detected!</h1><p>Smoke has been detected in your smart home. Investigate immediately!</p>");
-                    lastEmailAlertTime = now; // Reset email cooldown timer
+                    lastEmailAlertTime = now;
                 }
             }
         }
+
+        // --- Apply Alarm State ---
+        if (manualAlarmOverride) {
+            if (alarmManuallyEnabled) {
+                digitalWrite(ALERT_PIN, HIGH);
+                ESPNowHandler_sendCommand("ALARM_ON");
+                publishInfo("Alarm manually turned ON");
+            } else {
+                digitalWrite(ALERT_PIN, LOW);
+                ESPNowHandler_sendCommand("ALARM_OFF");
+                publishInfo("Alarm manually turned OFF");
+            }
+        } else if (activateAlarm) {
+            digitalWrite(ALERT_PIN, HIGH);
+            ESPNowHandler_sendCommand("ALARM_ON");
+            publishInfo("Alarm activated due to alert!");
+        } else {
+            digitalWrite(ALERT_PIN, LOW);
+            ESPNowHandler_sendCommand("ALARM_OFF");
+            publishInfo("Alarm turned off!");
+        }
+
+
+        // --- Critical High Temperature for Calling ---
+        // This part is still blocking due to callNumber/handUPCall.
+        // In a non-blocking `loop()`, you'd need to manage calling state more carefully.
+        // For now, it stays as is, but be aware it will block other activities while a call is active.
+        // QUESTION 2: Is this temperature threshold for calling separate from the 'High Temperature Alert' that sends SMS/Email?
+        // If temperature >= 65.0 is critical, should it *also* trigger the `activateAlarm` flag? YES.
+        if (temperature >= 65.0 && !isCalling && (currentSystemMode == MODE_GSM_ONLY || currentSystemMode == MODE_BOTH) && isGSMReady()) {
+            activateAlarm = true; // Turn on alarm for critical temp calling
+            ESPNowHandler_sendCommand("ALARM_ON");
+
+            if (callNumber(NUMBER_TO_CALL)) { // This initiates a call, which is blocking until the modem responds
+                isCalling = true;
+                callStart = now;
+                // QUESTION 3: Should the ALERT_PIN be HIGH when a call is initiated due to critical temperature? YES.
+                // This is handled by activateAlarm = true;
+            }
+        }
+
     } // End of SENSOR_READ_INTERVAL check
 
-    // --- Periodically get GSM Time and Location for testing ---
-    // Only attempt if GSM is enabled in the current mode and ready
-    if ((currentSystemMode == MODE_GSM_ONLY || currentSystemMode == MODE_BOTH) && isGSMReady()) {
-        if (now - lastTimeLocationCheck >= TIME_LOCATION_CHECK_INTERVAL) {
-            lastTimeLocationCheck = now;
-
-            Serial.println("\n--- GSM Time & Location Check ---");
-
-            String networkText = "GSM Network Time: ";
-            String networkTime = getNetworkTime();
-            networkText += networkTime;
-            Serial.println(networkText);
-
-            // String gsmLocationText = "GSM Location: ";
-            // String gsmLocation = getGsmLocation();
-            // gsmLocationText += gsmLocation;
-            // Serial.println(gsmLocationText);
-            Serial.println("---------------------------------");
-        }
-    }
-
-    // --- Critical High Temperature for Calling ---
-    // This part is still blocking due to callNumber/handUPCall.
-    // In a non-blocking `loop()`, you'd need to manage calling state more carefully.
-    // For now, it stays as is, but be aware it will block other activities while a call is active.
-    if (temperature >= 65.0 && !isCalling && (currentSystemMode == MODE_GSM_ONLY || currentSystemMode == MODE_BOTH) && isGSMReady()) {
-        if(callNumber(NUMBER_TO_CALL)) { // This initiates a call, which is blocking until the modem responds
-            isCalling = true;
-            callStart = now;
-        }
-    }
+    // QUESTION 4: Should the ALERT_PIN be turned OFF immediately after the call ends? No, only when cause of alert goes.
     if (isCalling && now - callStart >= callDuration) {
         handUPCall(); // This also involves AT commands and might block briefly
         isCalling = false;
     }
-
-    // No delay(500) here to keep loop non-blocking for MQTT/Sensors
-    // The delays in some sensor setup functions (like DHT, PIR warm-up, Gas calibration)
-    // and GSM setup/SMS sending still exist, but they are generally one-time or infrequent.
-    // The GSM waitResponse in checkForIncomingSMS might also be a slight concern.
-    // digitalWrite(4, LOW);
-    delay(1);
+    
+    delay(1); // Keep a small delay to yield to other tasks
+    
 }
 
 // Ensure `handleIncomingCommand` is defined in `aside.cpp` and declared in `aside.h`
@@ -622,7 +820,7 @@ void smtpCallback(SMTP_Status status){
 
         Serial.println("----------------");
         ESP_MAIL_PRINTF("Message sent success: %d\n", status.completedCount());
-        ESP_MAIL_PRINTF("Message sent failed: %d\n", status.failedCount());
+        ESP_MAIL_PRINTF("Message sent failed: %d: %d\n", status.failedCount());
         Serial.println("----------------\n");
 
         for (size_t i = 0; i < smtp.sendingResult.size(); i++)
@@ -648,6 +846,7 @@ void smtpCallback(SMTP_Status status){
     }
 }
 bool sendHtmlEmail(const char* recipient, const char* subject, const char* htmlContent) {
+    Serial.println("Attempting to send HTML Email");
     // Declare the message class
     SMTP_Message message;
 
@@ -668,7 +867,7 @@ bool sendHtmlEmail(const char* recipient, const char* subject, const char* htmlC
     // This function itself will check for an active connection implicitly
     // but we can add an explicit check here as well for clarity.
     if (WiFi.status() == WL_CONNECTED && checkInternetConnection()) {
-        if (!MailClient.sendMail(&smtp, &message)) {
+        if (!MailClient.sendMail(&smtp, &message, true)) {
             ESP_MAIL_PRINTF("Error sending HTML email, Status Code: %d, Error Code: %d, Reason: %s\n", smtp.statusCode(), smtp.errorCode(), smtp.errorReason().c_str());
             return false;
         }

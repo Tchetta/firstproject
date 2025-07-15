@@ -21,4 +21,12 @@ extern const char* MODE_KEY; // NVS key
 
 void setSystemMode(SystemMode newMode);
 
+struct SensorMuteStatus {
+    bool motion = false;
+    bool fire = false;
+    bool gas = false;
+    bool voltage = false;
+    bool temperature = false;
+};
+
 #endif

@@ -5,6 +5,9 @@
 // or define a global variable for the current mode.
 // For now, we'll assume a global 'currentSystemMode' can be updated or a function call.
 
+// Assuming manualAlarmOverride is declared as extern in aside.h
+extern bool manualAlarmOverride;
+
 // MQTT Broker details - moved to .cpp and made flexible
 const char* mqtt_server = "192.168.179.240"; // e.g., "192.168.1.100"
 const int mqtt_port = 1883;
@@ -26,6 +29,8 @@ const long RECONNECT_INTERVAL = 5000; // Try to reconnect every 5 seconds
 // Forward declaration for local use
 void mqtt_callback(char* topic, byte* payload, unsigned int length);
 void handleMqttCommand(const String& message); // New handler for MQTT commands
+
+const int alertPin = 2;
 
 /* // Function to initialize MQTT client
 void mqttSetup(const char* server, int port) {
@@ -101,26 +106,24 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
 
 // New function to handle incoming MQTT commands
 void handleMqttCommand(const String& message) {
-    // This is where you will add logic for commands from the dashboard
-    // For example:
-    if (message.equalsIgnoreCase("ALARM ON")) {
+  // This is where you will add logic for commands from the dashboard
+  // For example:
+  handleIncomingCommand("MQTT_CLIENT", message);
+    /* if (message.equalsIgnoreCase("ALARM ON")) {
         Serial.println("MQTT: Turning ALARM ON...");
-        // Call your existing setLedState("on") or similar function
-        // setLedState("on"); // Ensure this function is globally accessible or passed
-        digitalWrite(4, HIGH);
+        manualAlarmOverride = true; // Set manual override
+        digitalWrite(alertPin, HIGH);
     } else if (message.equalsIgnoreCase("ALARM OFF")) {
         Serial.println("MQTT: Turning ALARM OFF...");
-        // setLedState("off");
-        digitalWrite(4, LOW);
+        manualAlarmOverride = false; // Clear manual override
+        digitalWrite(alertPin, LOW);
     } else if (message.equalsIgnoreCase("MAINS ON")) {
         Serial.println("MQTT: Turning MAIN ON...");
-        // setLedState("off");
-        digitalWrite(4, LOW);
+        // digitalWrite(alertPin, LOW); // Still turning off pin 4 here if mains is on.
         ESPNowHandler_sendCommand("ON_APPLIANCE");
     } else if (message.equalsIgnoreCase("MAINS OFF")) {
         Serial.println("MQTT: Turning MAINS OFF...");
-        // setLedState("off");
-        digitalWrite(4, LOW);
+        digitalWrite(alertPin, LOW); // Still turning off pin 4 here if mains is off.
         ESPNowHandler_sendCommand("OFF_APPLIANCE");
 
     } else if (message.equalsIgnoreCase("MODE GSM")) {
@@ -146,7 +149,7 @@ void handleMqttCommand(const String& message) {
         ESP.restart();
     } else {
         Serial.println("MQTT: Unknown command: " + message);
-    }
+    } */
 }
 
 

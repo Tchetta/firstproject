@@ -172,6 +172,7 @@ void updateSerial()
 }
 
 void checkForIncomingSMS() {
+  // Serial.println("Checking SMS...");
   static String currentLine = "";
   static String senderNumber = "";
   static bool expectingMessage = false;
@@ -208,7 +209,6 @@ void checkForIncomingSMS() {
     }
   }
 }
-
 
 void deleteLastSMS() {
   // Deletes SMS at index 1 (works in this setup since new SMS always lands at index 1 in direct mode)
